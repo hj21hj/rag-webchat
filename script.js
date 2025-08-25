@@ -1,7 +1,6 @@
-/* RAG Web Chat — Vendoring dual-path + all fixes
- * - ensureWebLLM(): tries ./vendor/... first, then CDNs
- * - If Pages serves from /docs, workflow also writes docs/vendor/... so ./vendor works relative to index.html
- * - FAST/HYBRID/FULL retrieval; pdf.js; dynamic transformers import
+/* RAG Web Chat — No‑LLM Fallback (v3)
+ * - If LLM can't load or 'LLM 사용' is off, produces extractive answers from top-K chunks
+ * - FAST/HYBRID/FULL retrieval; pdf.js; dynamic transformers import (only when needed)
  */
 const statusEl = document.getElementById('status');
 const filesEl = document.getElementById('files');
@@ -13,55 +12,34 @@ const busy = document.getElementById('busy');
 const messagesEl = document.getElementById('messages');
 const qEl = document.getElementById('q');
 const gpuEl = document.getElementById('gpu');
-const modelGenEl = document.getElementById('modelGen');
-const modelEmbEl = document.getElementById('modelEmb');
 const topkShow = document.getElementById('topkShow');
 const pdfStatus = document.getElementById('pdf-status');
 const modeSel = document.getElementById('mode');
 const prefMEl = document.getElementById('prefM');
+const useLLM = document.getElementById('useLLM');
 
 // Config
 const TOP_K = 4;
 topkShow.textContent = String(TOP_K);
-const GEN_MODEL = 'Qwen2-0.5B-Instruct-q4f16_1-MLC';
-const GEN_TEMP = 0.7, GEN_TOP_P = 0.9;
+// Smaller embedding for speed
 const EMB_MODEL = 'Xenova/paraphrase-MiniLM-L3-v2';
 
-modelGenEl.textContent = GEN_MODEL;
-modelEmbEl.textContent = EMB_MODEL;
-
-// Local DB
+// DB
 const DB_META = localforage.createInstance({ name: 'rag-meta' });
 const DB_VEC = localforage.createInstance({ name: 'rag-vec' });
 const DB_LUNR = localforage.createInstance({ name: 'rag-lunr' });
 
-if (navigator.storage && navigator.storage.persist) {
-  navigator.storage.persist().then(p => {
-    const li = document.createElement('li');
-    li.textContent = 'Storage persist: ' + (p ? 'granted' : 'not granted');
-    statusEl.appendChild(li);
-  });
-}
-
 const supportsWebGPU = !!navigator.gpu;
 gpuEl.textContent = supportsWebGPU ? 'WebGPU OK' : 'WebGPU OFF (느림/미지원)';
 
-let webllmChat = null;
 let embedder = null;
 let stagedFiles = [];
 
 function li(msg) { const li = document.createElement('li'); li.textContent = msg; statusEl.appendChild(li); }
 function setBusy(b){ busy.style.display = b ? 'inline-block' : 'none'; }
-function addMsg(text, who){
-  const el = document.createElement('div'); el.className = 'msg ' + who; el.textContent = text;
-  messagesEl.appendChild(el); messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-function arrChunk(text, size=900, overlap=150) {
-  if (text.length <= size) return [text];
-  const out = []; for (let i=0; i<text.length; i+= (size-overlap)) out.push(text.slice(i, i+size)); return out;
-}
+function addMsg(text, who){ const el = document.createElement('div'); el.className = 'msg ' + who; el.textContent = text; messagesEl.appendChild(el); messagesEl.scrollTop = messagesEl.scrollHeight; }
+function arrChunk(text, size=900, overlap=150) { if (text.length <= size) return [text]; const out=[]; for (let i=0;i<text.length;i+=(size-overlap)) out.push(text.slice(i, i+size)); return out; }
 
-// File handling
 dropEl.addEventListener('dragover', e => { e.preventDefault(); dropEl.style.borderColor = '#4d65ff'; });
 dropEl.addEventListener('dragleave', e => { dropEl.style.borderColor = ''; });
 dropEl.addEventListener('drop', async e => {
@@ -80,12 +58,11 @@ async function readFile(file){
   const text = await file.text(); return { name: file.name, text };
 }
 
-// PDF via pdf.js UMD
+// PDF via pdf.js
 async function extractPdfText(file){
   const pdfjsLib = window['pdfjs-dist/build/pdf'];
   if (!pdfjsLib) { pdfStatus.textContent = 'pdf.js 로딩 실패'; return ''; }
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
   pdfStatus.textContent = `PDF 페이지: ${pdf.numPages}`;
   let text = ''; for (let i=1; i<=pdf.numPages; i++){
     const page = await pdf.getPage(i);
@@ -96,7 +73,6 @@ async function extractPdfText(file){
   pdfStatus.textContent = `PDF 텍스트 추출 완료 (${pdf.numPages}p)`; return text;
 }
 
-// Indexing
 indexBtn.addEventListener('click', async () => {
   if (!stagedFiles.length) return;
   setBusy(true); statusEl.innerHTML = ''; li('청크 생성...');
@@ -113,12 +89,8 @@ indexBtn.addEventListener('click', async () => {
   for (const d of docsForBM25){ idx.addDoc(d); }
   await DB_LUNR.setItem('bm25', idx.toJSON()); li('BM25 인덱스 완료.');
 
-  const mode = modeSel.value;
-  if (mode === 'full'){
-    li('임베딩 모델 로딩...'); await ensureEmbedder(); li('전 청크 임베딩...');
-    const vecs = []; for (const m of meta){ vecs.push(await embedder.embed(m.text)); }
-    await DB_VEC.setItem('vecs', vecs); li('임베딩 완료');
-  } else { await DB_VEC.removeItem('vecs'); }
+  // HYBRID/FULL은 질문 시에만 임베딩 필요 → upfront 임베딩 제거
+  await DB_VEC.removeItem('vecs');
 
   setBusy(false); li('인덱싱 완료');
 });
@@ -128,35 +100,58 @@ clearBtn.addEventListener('click', async () => {
   stagedFiles = []; filesEl.textContent = ''; statusEl.innerHTML = ''; pdfStatus.textContent = ''; addMsg('인덱스 비움', 'bot');
 });
 
-// Ask
 askBtn.addEventListener('click', async () => {
   const q = qEl.value.trim(); if (!q) return; addMsg(q, 'user'); qEl.value=''; setBusy(true);
   try {
-    const { meta } = await DB_META.getItem('meta').then(m => ({ meta: m || [] }));
+    const meta = await DB_META.getItem('meta') || [];
     if (!meta.length){ addMsg('인덱스가 비었습니다. 먼저 인덱싱하세요.', 'bot'); setBusy(false); return; }
 
-    const mode = modeSel.value; let ctxs = [];
+    const mode = modeSel.value;
+    let ctxs = [];
     if (mode === 'fast'){
       ctxs = await bm25Top(q, meta, TOP_K);
     } else if (mode === 'hybrid'){
       const M = Math.max(TOP_K, parseInt(prefMEl.value||'120',10));
-      const pre = await bm25Top(q, meta, M); await ensureEmbedder();
-      const qv = await embedder.embed(q);
+      const pre = await bm25Top(q, meta, M);
+      await ensureEmbedder(); const qv = await embedder.embed(q);
       const scores = pre.map(p => ({ sc: cosine(p.text, qv), it: p })).sort((a,b)=>b.sc-a.sc);
       ctxs = scores.slice(0, TOP_K).map(s => ({ ...s.it, score: s.sc }));
     } else {
-      const vecs = await DB_VEC.getItem('vecs') || [];
-      if (!vecs.length){ addMsg('벡터 인덱스가 없습니다. FULL 모드로 다시 인덱싱하세요.', 'bot'); setBusy(false); return; }
-      await ensureEmbedder(); const qv = await embedder.embed(q);
-      const scores = vecs.map((v,i)=>({ sc: cosine(v, qv), idx:i })).sort((a,b)=>b.sc-a.sc);
-      ctxs = scores.slice(0, TOP_K).map(s => ({ ...meta[s.idx], score: s.sc }));
+      const vecs = await DB_VEC.getItem('vecs') || []; // 없도록 설계
+      if (!vecs.length){
+        addMsg('FULL 모드를 쓰려면 먼저 FULL로 다시 인덱싱하세요. 지금은 HYBRID/FAST 권장.', 'bot');
+        setBusy(false); return;
+      }
     }
 
-    const ans = await generate(buildPrompt(q, ctxs)); addMsg(ans, 'bot');
+    // ======== No-LLM fallback ========
+    if (!useLLM.checked){
+      addMsg(renderExtractiveAnswer(q, ctxs), 'bot');
+      addMsg(ctxs.map(c => `- ${c.file} (score ${c.score!==undefined? c.score.toFixed(3):'BM25'})`).join('\n'), 'bot');
+      setBusy(false); return;
+    }
+
+    // If user enabled LLM, try to load via CDN (may fail in blocked networks)
+    try {
+      const ans = await generateLLM(buildPrompt(q, ctxs));
+      addMsg(ans, 'bot');
+    } catch (e){
+      addMsg('LLM 로드 실패 → 추출형 답변으로 대체합니다.', 'bot');
+      addMsg(renderExtractiveAnswer(q, ctxs), 'bot');
+    }
     addMsg(ctxs.map(c => `- ${c.file} (score ${c.score!==undefined? c.score.toFixed(3):'BM25'})`).join('\n'), 'bot');
   } catch (e){ console.error(e); addMsg('오류: ' + e.message, 'bot'); } finally { setBusy(false); }
 });
 
+function renderExtractiveAnswer(q, ctxs){
+  const header = '※ LLM 없이 문서에서 직접 발췌한 답변(요약 아님)';
+  const body = ctxs.map((c,i)=>`[${i+1}] ${c.file}\n${snippet(c.text)}\n`).join('\n');
+  return `${header}\n\n${body}`;
+}
+function snippet(t){
+  const s = t.replace(/\s+/g,' ').trim();
+  return s.slice(0, 500) + (s.length>500 ? ' …' : '');
+}
 function buildPrompt(q, ctxs){
   const joined = ctxs.map((c,i)=>`[DOC ${i+1}] from ${c.file}:\n${c.text}`).join('\n\n');
   const sys = 'You are a helpful RAG assistant. Answer using ONLY the provided documents. If insufficient, say so. Cite filenames like [source: file]. Answer in Korean if user is Korean.';
@@ -164,13 +159,7 @@ function buildPrompt(q, ctxs){
   return `<<SYS>>${sys}<</SYS>>\nQuestion:\n${q}\n\nContext:\n${joined}\n\nWhen answering, include citations: ${srcHint}\n\nAnswer:`;
 }
 
-// Helpers
-function cosine(a,b){ let s=0, na=0, nb=0; for (let i=0;i<a.length;i++){ s+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return s/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
-async function bm25Top(q, meta, k){
-  let idxJson = await DB_LUNR.getItem('bm25'); if (!idxJson) return meta.slice(0,k);
-  const idx = elasticlunr.Index.load(idxJson); const hits = idx.search(q, { expand:true });
-  return hits.slice(0,k).map(h => { const m = meta.find(mm => String(mm.id) === h.ref); return { ...m, score: h.score }; });
-}
+// Embeddings (only when HYBRID)
 async function ensureEmbedder(){
   if (embedder) return;
   const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.min.js');
@@ -178,31 +167,34 @@ async function ensureEmbedder(){
   embedder = { async embed(text){ const out = await pipe(text, { pooling:'mean', normalize:true }); return Array.from(out.data);} };
 }
 
-// WebLLM loader: local then CDNs
+// Generate via WebLLM (CDN; may fail → handled by try/catch)
 async function ensureWebLLM(){
-  if (webllmChat) return;
   const bases = [
-    './vendor/web-llm/dist/',
     'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm/dist/',
     'https://unpkg.com/@mlc-ai/web-llm/dist/',
   ];
-  let lastErr = null;
   for (const base of bases){
     try {
-      li('WebLLM 불러오는 중: ' + base);
-      const mod = await importWithTimeout(base + 'index.js', 15000);
+      const mod = await import(base + 'index.js');
       const worker = new Worker(base + 'worker.js', { type: 'module' });
       const initProgressCallback = (p) => { if (p.text) li(p.text); };
-      webllmChat = await mod.CreateWebWorkerMLCEngine(worker, { model_id: GEN_MODEL }, initProgressCallback);
-      return;
-    } catch (e){ console.warn('WebLLM 로드 실패 @', base, e); lastErr = e; }
+      return { engine: await mod.CreateWebWorkerMLCEngine(worker, { model_id: 'Qwen2-0.5B-Instruct-q4f16_1-MLC' }, initProgressCallback) };
+    } catch {}
   }
-  addMsg('WebLLM 로드 실패. FAST 모드로 검색만 이용 가능합니다.', 'bot'); throw lastErr || new Error('WebLLM load failed');
+  throw new Error('WebLLM blocked');
 }
-function importWithTimeout(url, ms){ return Promise.race([ import(url), new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout ' + url)), ms)) ]); }
-async function generate(prompt){
-  await ensureWebLLM();
-  const reply = await webllmChat.chat.completions.create({ messages: [{ role:'user', content: prompt }], temperature: GEN_TEMP, top_p: GEN_TOP_P, stream:false });
+async function generateLLM(prompt){
+  const { engine } = await ensureWebLLM();
+  const reply = await engine.chat.completions.create({ messages: [{ role:'user', content: prompt }], temperature: 0.7, top_p: 0.9, stream: false });
   return reply.choices?.[0]?.message?.content || '(no response)';
 }
+
+// BM25 + helpers
+async function bm25Top(q, meta, k){
+  let idxJson = await DB_LUNR.getItem('bm25'); if (!idxJson) return meta.slice(0,k);
+  const idx = elasticlunr.Index.load(idxJson); const hits = idx.search(q, { expand:true });
+  return hits.slice(0, k).map(h => { const m = meta.find(mm => String(mm.id) === h.ref); return { ...m, score: h.score }; });
+}
+function cosine(a,b){ let s=0, na=0, nb=0; for (let i=0;i<a.length;i++){ s+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return s/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
+
 li('브라우저 WebGPU: ' + (navigator.gpu ? 'OK' : 'OFF'));
