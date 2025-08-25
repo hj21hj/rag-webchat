@@ -1,9 +1,0 @@
-- name: Download @mlc-ai/web-llm
-  run: |
-    mkdir -p docs/vendor/web-llm
-    npm pack @mlc-ai/web-llm@latest
-    TARBALL=$(ls @mlc-ai-web-llm-*.tgz | head -n 1)
-    tar -xzf "$TARBALL"
-    rsync -av package/dist/ docs/vendor/web-llm/dist/ --delete
-    rm -rf package "$TARBALL"
-
