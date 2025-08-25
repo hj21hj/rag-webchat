@@ -12,10 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
       - name: Fetch @mlc-ai/web-llm and stage files
+        shell: bash
         run: |
           set -euxo pipefail
           npm config set registry https://registry.npmjs.org/
@@ -23,14 +26,17 @@ jobs:
           TARBALL=$(ls @mlc-ai-web-llm-*.tgz | head -n 1)
           tar -xzf "$TARBALL"
           mkdir -p vendor/web-llm/dist docs/vendor/web-llm/dist
-          rsync -a package/dist/ vendor/web-llm/dist/ --delete
-          rsync -a package/dist/ docs/vendor/web-llm/dist/ --delete || true
+          # rsync 없이 복사
+          cp -r package/dist/* vendor/web-llm/dist/
+          cp -r package/dist/* docs/vendor/web-llm/dist/ || true
           rm -rf package "$TARBALL"
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           branch: vendor/web-llm-update
+          branch-suffix: timestamp
           commit-message: "Vendor web-llm dist"
           title: "Vendor web-llm dist"
-          body: "Auto-vendor @mlc-ai/web-llm into vendor paths"
+          body: "Auto-vendor @mlc-ai/web-llm into vendor paths (root + docs)."
           delete-branch: true
