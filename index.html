@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Web Chat (Client‑Only, WebGPU)</title>
+  <link rel="stylesheet" href="./style.css">
+
+  <!-- localForage (IndexedDB) -->
+  <script src="https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js"></script>
+  <!-- elasticlunr (BM25) -->
+  <script src="https://cdn.jsdelivr.net/npm/elasticlunr/elasticlunr.min.js"></script>
+  <!-- pdf.js UMD + worker -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.js"></script>
+  <script>
+    window['pdfjs-dist/build/pdf'].GlobalWorkerOptions.workerSrc =
+      'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.js';
+  </script>
+</head>
+<body>
+<header>
+  <h1>RAG Web Chat</h1>
+  <span class="pill" id="gpu"></span>
+  <div class="pill">모드:
+    <select id="mode">
+      <option value="hybrid" selected>HYBRID (추천)</option>
+      <option value="fast">FAST (BM25만)</option>
+      <option value="full">FULL (전 청크 임베딩)</option>
+    </select>
+  </div>
+  <button id="btn-index" disabled>인덱싱</button>
+  <button id="btn-clear">인덱스 지우기</button>
+  <span id="busy" style="display:none" class="spinner"></span>
+</header>
+
+<main>
+  <section class="card">
+    <div><strong>문서 업로드</strong> <span class="small">.txt / .md / .pdf 드래그앤드롭</span></div>
+    <div id="drop" class="drop">여기로 파일을 드래그하세요</div>
+    <div class="small" id="files"></div>
+    <div class="small" id="pdf-status" style="margin-top:6px;"></div>
+  </section>
+
+  <aside class="card">
+    <div><strong>상태</strong></div>
+    <ul class="clean small" id="status"></ul>
+    <div class="small">모델은 최초 로딩 시 웹에서 다운로드됩니다.</div>
+  </aside>
+
+  <section class="card" style="grid-column: 1 / -1;">
+    <div class="messages" id="messages"></div>
+    <div class="row" style="margin-top:10px;">
+      <textarea id="q" placeholder="문서 기반으로 질문하세요."></textarea>
+      <button id="ask">질의하기</button>
+    </div>
+    <div class="small" style="margin-top:6px;">
+      모델: <span id="modelGen"></span> / 임베딩: <span id="modelEmb"></span> / TopK: <span id="topkShow">4</span> / Prefilter M: <input id="prefM" type="number" value="120" style="width:70px">
+    </div>
+  </section>
+</main>
+
+<script type="module" src="./script.js"></script>
+</body>
+</html>
