@@ -1,0 +1,36 @@
+name: Vendor WebLLM dist via PR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Fetch @mlc-ai/web-llm and stage files
+        run: |
+          set -euxo pipefail
+          npm config set registry https://registry.npmjs.org/
+          npm pack @mlc-ai/web-llm@latest
+          TARBALL=$(ls @mlc-ai-web-llm-*.tgz | head -n 1)
+          tar -xzf "$TARBALL"
+          mkdir -p vendor/web-llm/dist docs/vendor/web-llm/dist
+          rsync -a package/dist/ vendor/web-llm/dist/ --delete
+          rsync -a package/dist/ docs/vendor/web-llm/dist/ --delete || true
+          rm -rf package "$TARBALL"
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: vendor/web-llm-update
+          commit-message: "Vendor web-llm dist"
+          title: "Vendor web-llm dist"
+          body: "Auto-vendor @mlc-ai/web-llm into vendor paths"
+          delete-branch: true
