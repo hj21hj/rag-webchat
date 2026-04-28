@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>초간편 로컬 PDF 챗봇</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 100% 온브라우저 PDF 챗봇</h1>
+        <p class="subtitle">문서 데이터는 서버로 전송되지 않고 브라우저 안에서만 처리됩니다.</p>
+        
+        <div id="drop-zone">
+            <p>PDF 파일을 여기에 드래그하거나 클릭하여 업로드하세요</p>
+            <input type="file" id="file-input" accept=".pdf" hidden>
+        </div>
+
+        <div id="status-container">
+            <span id="status-label">엔진 준비 중...</span>
+            <div id="progress-bar"><div id="progress-fill"></div></div>
+        </div>
+
+        <div id="chat-window">
+            <div id="messages"></div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="문서 내용에 대해 질문하세요..." disabled>
+            <button id="send-btn" disabled>전송</button>
+        </div>
+    </div>
+    <script type="module" src="main.js"></script>
+</body>
+</html>
